@@ -583,10 +583,6 @@
 
 
 
-
-
-
-
 # Copyright (c) 2025 devgagan : https://github.com/devgaganin.  
 # Licensed under the GNU General Public License v3.0.  
 # See LICENSE file in the repository root for full license text.
@@ -822,7 +818,7 @@ async def send_direct(c, m, tcid, ft=None, rtmid=None):
         return False
 
 # ==============================================================================
-# FINAL FIXED PROCESS_MSG WITH ZIP SAFETY AND DISK CLEANUP
+# PROCESS MSG WITH ZIP/0KB/CRASH PROTECTION
 # ==============================================================================
 async def process_msg(c, u, m, d, lt, uid, i):
     try:
@@ -850,6 +846,26 @@ async def process_msg(c, u, m, d, lt, uid, i):
             st = time.time()
             p = await c.send_message(d, 'Downloading...')
 
+            # -------------------------------------------------------------------
+            # CRITICAL CHECK: Identify if original file is actually a video
+            # -------------------------------------------------------------------
+            video_extensions = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.ogv']
+            is_real_video = False
+            
+            # Check 1: Is it a Telegram Video object?
+            if m.video:
+                is_real_video = True
+            # Check 2: If Document, check ORIGINAL extension (before rename)
+            elif m.document:
+                orig_name = m.document.file_name if m.document.file_name else ""
+                orig_ext = os.path.splitext(orig_name)[1].lower()
+                if orig_ext in video_extensions:
+                    is_real_video = True
+            
+            # If it's a ZIP/RAR/etc, we force document mode to bypass OpenCV
+            force_document = not is_real_video
+            # -------------------------------------------------------------------
+
             c_name = f"{time.time()}"
             if m.video:
                 file_name = m.video.file_name
@@ -876,7 +892,7 @@ async def process_msg(c, u, m, d, lt, uid, i):
                 await c.edit_message_text(d, p.id, 'Failed.')
                 return 'Failed.'
             
-            # DISK FULL CHECK: Delete empty files immediately
+            # Disk Full Check
             if os.path.exists(f) and os.path.getsize(f) == 0:
                 os.remove(f)
                 await c.edit_message_text(d, p.id, 'Failed: Disk Full (0KB file).')
@@ -899,39 +915,41 @@ async def process_msg(c, u, m, d, lt, uid, i):
                 await c.edit_message_text(d, p.id, 'File is larger than 2GB. Using alternative method...')
                 await upd_dlg(Y)
                 
-                # FIX: SAFETY CHECK FOR ZIP FILES RENAMED AS VIDEO
-                video_extensions = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.ogv']
-                file_ext = os.path.splitext(f)[1].lower()
                 dur, h, w = 0, 0, 0
                 
-                # Only try to get metadata if it REALLY looks like a video
-                if m.video or (m.document and file_ext in video_extensions):
+                # ONLY run metadata/screenshot if it was originally a video
+                if is_real_video:
                     try:
                         mtd = await get_video_metadata(f)
                         dur, h, w = mtd['duration'], mtd['width'], mtd['height']
                         generated_thumb = await screenshot(f, dur, d)
                         th = generated_thumb
                     except Exception as e:
-                        print(f"Metadata extraction failed (safe fail): {e}")
+                        print(f"Metadata error (safe skip): {e}")
 
                 try:
-                    send_funcs = {'video': Y.send_video, 'video_note': Y.send_video_note, 
-                                'voice': Y.send_voice, 'audio': Y.send_audio, 
-                                'photo': Y.send_photo, 'document': Y.send_document}
-                    
-                    for mtype, func in send_funcs.items():
-                        if f.endswith('.mp4'): mtype = 'video'
-                        if getattr(m, mtype, None):
-                            sent = await func(LOG_GROUP, f, thumb=th if mtype == 'video' else None, 
-                                            duration=dur if mtype == 'video' else None,
-                                            height=h if mtype == 'video' else None,
-                                            width=w if mtype == 'video' else None,
-                                            caption=ft if m.caption and mtype not in ['video_note', 'voice'] else None, 
-                                            reply_to_message_id=rtmid, progress=prog, progress_args=(c, d, p.id, st))
-                            break
-                    else:
+                    # If force_document is True, skip trying to send as video
+                    if force_document:
                         sent = await Y.send_document(LOG_GROUP, f, thumb=th, caption=ft if m.caption else None,
                                                     reply_to_message_id=rtmid, progress=prog, progress_args=(c, d, p.id, st))
+                    else:
+                        send_funcs = {'video': Y.send_video, 'video_note': Y.send_video_note, 
+                                    'voice': Y.send_voice, 'audio': Y.send_audio, 
+                                    'photo': Y.send_photo, 'document': Y.send_document}
+                        
+                        for mtype, func in send_funcs.items():
+                            if f.endswith('.mp4') and is_real_video: mtype = 'video'
+                            if getattr(m, mtype, None):
+                                sent = await func(LOG_GROUP, f, thumb=th if mtype == 'video' else None, 
+                                                duration=dur if mtype == 'video' else None,
+                                                height=h if mtype == 'video' else None,
+                                                width=w if mtype == 'video' else None,
+                                                caption=ft if m.caption and mtype not in ['video_note', 'voice'] else None, 
+                                                reply_to_message_id=rtmid, progress=prog, progress_args=(c, d, p.id, st))
+                                break
+                        else:
+                            sent = await Y.send_document(LOG_GROUP, f, thumb=th, caption=ft if m.caption else None,
+                                                        reply_to_message_id=rtmid, progress=prog, progress_args=(c, d, p.id, st))
                     
                     await c.copy_message(d, LOG_GROUP, sent.id)
                 finally:
@@ -947,14 +965,10 @@ async def process_msg(c, u, m, d, lt, uid, i):
             st = time.time()
 
             try:
-                video_extensions = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.ogv']
-                audio_extensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a', '.opus', '.aiff', '.ac3']
-                file_ext = os.path.splitext(f)[1].lower()
-                
                 uploaded = False
                 
-                # FIX: TRY-EXCEPT BLOCK TO CATCH "ZIP RENAMED AS MP4" ERRORS
-                if m.video or (m.document and file_ext in video_extensions):
+                # ONLY try to upload as video if it IS a video originally
+                if is_real_video and (m.video or (m.document and os.path.splitext(f)[1].lower() in video_extensions)):
                     try:
                         mtd = await get_video_metadata(f)
                         dur, h, w = mtd['duration'], mtd['width'], mtd['height']
@@ -967,11 +981,11 @@ async def process_msg(c, u, m, d, lt, uid, i):
                                         reply_to_message_id=rtmid)
                         uploaded = True
                     except Exception as e:
-                        print(f"Failed to upload as video (likely zip file): {e}")
-                        uploaded = False # Fallback to document
-                
+                        print(f"Failed to upload as video: {e}")
+                        uploaded = False
+
                 if not uploaded:
-                    if m.video_note:
+                    if m.video_note and is_real_video:
                         await c.send_video_note(tcid, video_note=f, progress=prog, 
                                             progress_args=(c, d, p.id, st), reply_to_message_id=rtmid)
                     elif m.voice:
@@ -979,8 +993,8 @@ async def process_msg(c, u, m, d, lt, uid, i):
                                         reply_to_message_id=rtmid)
                     elif m.sticker:
                         await c.send_sticker(tcid, m.sticker.file_id, reply_to_message_id=rtmid)
-                    elif m.audio or (m.document and file_ext in audio_extensions):
-                        await c.send_audio(tcid, audio=f, caption=ft if m.caption else None, 
+                    elif m.audio: # Audio check remains valid
+                         await c.send_audio(tcid, audio=f, caption=ft if m.caption else None, 
                                         thumb=th, progress=prog, progress_args=(c, d, p.id, st), 
                                         reply_to_message_id=rtmid)
                     elif m.photo:
@@ -988,7 +1002,7 @@ async def process_msg(c, u, m, d, lt, uid, i):
                                         progress=prog, progress_args=(c, d, p.id, st), 
                                         reply_to_message_id=rtmid)
                     else:
-                        # Fallback for ZIPs and others
+                        # Fallback for ZIPs and everything else
                         await c.send_document(tcid, document=f, caption=ft if m.caption else None, 
                                             progress=prog, progress_args=(c, d, p.id, st), 
                                             reply_to_message_id=rtmid)
@@ -1000,7 +1014,7 @@ async def process_msg(c, u, m, d, lt, uid, i):
                     os.remove(generated_thumb)
                 return 'Failed.'
             
-            # CLEANUP ON SUCCESS
+            # CLEANUP
             if os.path.exists(f): 
                 os.remove(f)
             if generated_thumb and os.path.exists(generated_thumb): 
