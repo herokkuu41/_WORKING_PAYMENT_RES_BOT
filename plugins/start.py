@@ -33,6 +33,7 @@ async def set(_, message):
     await app.set_bot_commands([
         BotCommand("start", "🚀 Start the bot"),
         BotCommand("batch", "🫠 Extract in bulk"),
+        BotCommand("multibatch", "🌀 Queue multiple batches"),
         BotCommand("login", "🔑 Get into the bot"),
         BotCommand("setbot", "🧸 Add your bot for handling files"),
         BotCommand("logout", "🚪 Get out of the bot"),
@@ -77,26 +78,28 @@ help_pages = [
         "> Log into the bot for private channel access\n\n"
         "9. **/batch**\n"
         "> Bulk extraction for posts (After login)\n\n"
+        "10. **/multibatch**\n"
+        "> Schedule multiple batches with timed gaps\n\n"
     ),
     (
         "📝 **Bot Commands Overview (2/2)**:\n\n"
-        "10. **/logout**\n"
+        "11. **/logout**\n"
         "> Logout from the bot\n\n"
-        "11. **/stats**\n"
+        "12. **/stats**\n"
         "> Get bot stats\n\n"
-        "12. **/plan**\n"
+        "13. **/plan**\n"
         "> Check premium plans\n\n"
-        "13. **/speedtest**\n"
+        "14. **/speedtest**\n"
         "> Test the server speed (not available in v3)\n\n"
-        "14. **/terms**\n"
+        "15. **/terms**\n"
         "> Terms and conditions\n\n"
-        "15. **/cancel**\n"
+        "16. **/cancel**\n"
         "> Cancel ongoing batch process\n\n"
-        "16. **/myplan**\n"
+        "17. **/myplan**\n"
         "> Get details about your plans\n\n"
-        "17. **/session**\n"
+        "18. **/session**\n"
         "> Generate Pyrogram V2 session\n\n"
-        "18. **/settings**\n"
+        "19. **/settings**\n"
         "> 1. SETCHATID : To directly upload in channel or group or user's dm use it with -100[chatID]\n"
         "> 2. SETRENAME : To add custom rename tag or username of your channels\n"
         "> 3. CAPTION : To add custom caption\n"
