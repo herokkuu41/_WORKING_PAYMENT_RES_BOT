@@ -1695,8 +1695,88 @@ async def process_msg(c, u, m, d, lt, uid, i):
             return 'Sent.'
     except Exception as e:
         return f'Error: {str(e)[:50]}'
+
+
+async def run_multibatch(uid: int, message: Message, slots: list):
+    pt = await message.reply_text('Preparing multibatch...')
+
+    ubot = UB.get(uid)
+    if not ubot:
+        await pt.edit('Add bot with /setbot first')
+        Z.pop(uid, None)
+        return
+
+    uc = await get_uclient(uid)
+    if not uc:
+        await pt.edit('Cannot proceed without user client.')
+        Z.pop(uid, None)
+        return
+
+    if is_user_active(uid):
+        await pt.edit('Active task exists. Use /stop first.')
+        Z.pop(uid, None)
+        return
+
+    total_msgs = sum(slot['count'] for slot in slots)
+    success = 0
+    processed = 0
+
+    await add_active_batch(uid, {
+        "total": total_msgs,
+        "current": 0,
+        "success": 0,
+        "cancel_requested": False,
+        "progress_message_id": pt.id,
+        "mode": "multibatch"
+    })
+
+    try:
+        for idx, slot in enumerate(slots, start=1):
+            if should_cancel(uid):
+                await pt.edit(f'Cancelled before slot {idx}. Success: {success}/{processed}')
+                break
+
+            await pt.edit(f'Starting slot {idx}/{len(slots)} (messages: {slot["count"]})')
+
+            for j in range(slot['count']):
+                if should_cancel(uid):
+                    await pt.edit(f'Cancelled at slot {idx}, message {j+1}. Success: {success}/{processed}')
+                    break
+
+                mid = int(slot['sid']) + j
+
+                try:
+                    msg = await get_msg(ubot, uc, slot['cid'], mid, slot['lt'])
+                    if msg:
+                        res = await process_msg(ubot, uc, msg, str(message.chat.id), slot['lt'], uid, slot['cid'])
+                        if 'Done' in res or 'Copied' in res or 'Sent' in res:
+                            success += 1
+                except Exception as e:
+                    try:
+                        await pt.edit(f'Slot {idx} {j+1}/{slot["count"]}: Error - {str(e)[:30]}')
+                    except Exception:
+                        pass
+
+                processed += 1
+                await update_batch_progress(uid, processed, success)
+                await asyncio.sleep(10)
+
+            if should_cancel(uid):
+                break
+
+            if idx < len(slots):
+                next_slot = slots[idx]
+                await message.reply_text(
+                    f'Slot {idx} finished. Slot {idx + 1} starts in 60s. Next link: {next_slot.get("raw_link", "N/A")}')
+                await asyncio.sleep(60)
+
+        if not should_cancel(uid):
+            await message.reply_text(f'Multibatch completed ✅ Success: {success}/{total_msgs}')
+    finally:
+        await remove_active_batch(uid)
+        Z.pop(uid, None)
         
-@X.on_message(filters.command(['batch', 'single']))
+@X.on_message(filters.command(['batch', 'single', 'multibatch']))
 async def process_cmd(c, m):
     uid = m.from_user.id
     cmd = m.command[0]
@@ -1717,8 +1797,12 @@ async def process_cmd(c, m):
         await pro.edit('Add your bot with /setbot first')
         return
     
-    Z[uid] = {'step': 'start' if cmd == 'batch' else 'start_single'}
-    await pro.edit(f'Send {"start link..." if cmd == "batch" else "link you to process"}.')
+    if cmd == 'multibatch':
+        Z[uid] = {'step': 'multibatch_slots'}
+        await pro.edit('How many slots do you want to book? (max 5)')
+    else:
+        Z[uid] = {'step': 'start' if cmd == 'batch' else 'start_single'}
+        await pro.edit(f'Send {"start link..." if cmd == "batch" else "link you to process"}.')
 
 @X.on_message(filters.command(['cancel', 'stop']))
 async def cancel_cmd(c, m):
@@ -1732,7 +1816,7 @@ async def cancel_cmd(c, m):
         await m.reply_text('No active batch process found.')
 
 @X.on_message(filters.text & filters.private & ~login_in_progress & ~filters.command([
-    'start', 'batch', 'cancel', 'login', 'logout', 'stop', 'set', 
+    'start', 'batch', 'multibatch', 'cancel', 'login', 'logout', 'stop', 'set',
     'pay', 'redeem', 'gencode', 'single', 'generate', 'keyinfo', 'encrypt', 'decrypt', 'keys', 'setbot', 'rembot']))
 async def text_handler(c, m):
     uid = m.from_user.id
@@ -1740,7 +1824,7 @@ async def text_handler(c, m):
     s = Z[uid].get('step')
     x = await get_ubot(uid)
     if not x:
-        await message.reply("Add your bot /setbot `token`")
+        await m.reply("Add your bot /setbot `token`")
         return
 
     if s == 'start':
@@ -1752,6 +1836,65 @@ async def text_handler(c, m):
             return
         Z[uid].update({'step': 'count', 'cid': i, 'sid': d, 'lt': lt})
         await m.reply_text('How many messages?')
+
+    elif s == 'multibatch_slots':
+        if not m.text.isdigit():
+            await m.reply_text('Enter a valid slot number.')
+            return
+
+        slots_requested = int(m.text)
+        if slots_requested < 1:
+            await m.reply_text('Please request at least one slot.')
+            return
+        if slots_requested > 5:
+            await m.reply_text('Maximum 5 slots are supported in one multibatch.')
+            return
+
+        Z[uid].update({
+            'step': 'multibatch_link',
+            'slots_total': slots_requested,
+            'slots': [],
+            'current_slot': 1
+        })
+        await m.reply_text('Slot 1 - send batch link')
+
+    elif s == 'multibatch_link':
+        L = m.text
+        i, d, lt = E(L)
+        if not i or not d:
+            await m.reply_text('Invalid link format. Send the slot link again.')
+            return
+
+        Z[uid].update({
+            'step': 'multibatch_count',
+            'pending_link': {'cid': i, 'sid': d, 'lt': lt, 'raw_link': L}
+        })
+        await m.reply_text(f'Slot {Z[uid]["current_slot"]} - how many messages?')
+
+    elif s == 'multibatch_count':
+        if not m.text.isdigit():
+            await m.reply_text('Enter valid number.')
+            return
+
+        count = int(m.text)
+        maxlimit = PREMIUM_LIMIT if await is_premium_user(uid) else FREEMIUM_LIMIT
+
+        if count > maxlimit:
+            await m.reply_text(f'Maximum limit per slot is {maxlimit}.')
+            return
+
+        pending = Z[uid].pop('pending_link')
+        slots = Z[uid]['slots']
+        slots.append({**pending, 'count': count})
+
+        if Z[uid]['current_slot'] >= Z[uid]['slots_total']:
+            Z[uid]['step'] = 'multibatch_process'
+            await run_multibatch(uid, m, slots)
+            return
+
+        Z[uid]['current_slot'] += 1
+        Z[uid]['step'] = 'multibatch_link'
+        await m.reply_text(f'Slot {Z[uid]["current_slot"]} - send batch link')
 
     elif s == 'start_single':
         L = m.text
