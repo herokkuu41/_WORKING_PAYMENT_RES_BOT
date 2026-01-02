@@ -22,12 +22,13 @@ from typing import Dict, Any, Optional
 
 # shared userbot (Y) if STRING present
 Y = None if not STRING else __import__('shared_client').userbot
-Z, P, UB, UC, emp = {}, {}, {}, {}, {}
+Z, P, UB, UC = {}, {}, {}, {}
 
 ACTIVE_USERS = {}
 ACTIVE_USERS_FILE = "active_users.json"
 
-# helpers
+# --- Helpers ---
+
 def sanitize(filename):
     return re.sub(r'[<>:"/\\|?*\']', '_', filename).strip(" .")[:255]
 
@@ -83,52 +84,57 @@ ACTIVE_USERS = load_active_users()
 
 async def upd_dlg(c):
     try:
-        # Increased limit to ensure cache is populated
+        # Update dialogs to ensure cache is fresh
         async for _ in c.get_dialogs(limit=5000): pass
         return True
     except Exception as e:
         print(f'Failed to update dialogs: {e}')
         return False
 
-# optimized get_msg (works with public/private)
+# --- Core Logic Functions ---
+
 async def get_msg(c, u, i, d, lt):
+    """
+    Fetches a message from a channel/group.
+    Prioritizes User Client (u) for public links to ensure access.
+    """
     try:
         if lt == 'public':
-            # FIX: Prioritize User Client (u) for public channels
+            # 1. Try User Client First (Better for Clone)
             if u:
                 try:
-                    # Try fetching directly with user client
+                    # Attempt direct fetch
                     msg = await u.get_messages(i, d)
                     if msg and not getattr(msg, "empty", False):
                         return msg
-                except Exception as e:
-                    print(f"User fetch failed (attempting join): {e}")
+                except Exception:
+                    pass
                 
-                # If direct fetch failed, try joining then fetching
                 try:
+                    # Attempt join + fetch
                     await u.join_chat(i)
                     msg = await u.get_messages(i, d)
                     if msg and not getattr(msg, "empty", False):
                         return msg
-                except Exception as e:
-                    print(f"User join/fetch failed: {e}")
+                except Exception:
+                    pass
 
-            # Fallback to Bot Client (c) if user failed or unavailable
+            # 2. Fallback to Bot Client
             if c:
                 try:
                     msg = await c.get_messages(i, d)
                     if msg and not getattr(msg, "empty", False):
                         return msg
-                except Exception as e:
-                    print(f"Bot fetch failed: {e}")
+                except Exception:
+                    pass
             
             return None
 
         else:
-            # Private Channel Logic
+            # Private Link Logic
             if u:
                 try:
-                    # Strict ID handling for private chats - normalize to -100<id>
+                    # Normalize Chat ID
                     chat_id = str(i)
                     if chat_id.startswith("-100"):
                         final_id = int(chat_id)
@@ -137,7 +143,7 @@ async def get_msg(c, u, i, d, lt):
                     else:
                         final_id = int(f"-100{chat_id}")
 
-                    # Attempt 1: Direct fetch
+                    # Retry logic for private messages
                     try:
                         msg = await u.get_messages(final_id, d)
                         if msg and not getattr(msg, "empty", False):
@@ -145,7 +151,6 @@ async def get_msg(c, u, i, d, lt):
                     except Exception:
                         pass
 
-                    # Attempt 2: Force refresh dialogs
                     try:
                         async for dialog in u.get_dialogs(limit=5000):
                             if dialog.chat.id == final_id:
@@ -153,14 +158,12 @@ async def get_msg(c, u, i, d, lt):
                     except Exception:
                         pass
 
-                    # Attempt 3: Retry fetch
                     try:
                         msg = await u.get_messages(final_id, d)
                         if msg and not getattr(msg, "empty", False):
                             return msg
                     except Exception:
                         return None
-
                 except Exception as e:
                     print(f'Private channel error: {e}')
                     return None
@@ -202,26 +205,20 @@ async def get_uclient(uid):
             return ubot if ubot else Y
     return Y
 
-# Progress helper with adjustable interval
 async def prog(c, t, C, h, m, st, ud_type):
     global P
     now = time.time()
     p = c / t * 100
-
-    # interval logic
     interval = 25 if ud_type == "Downloading" else 6
     if m in P and (now - P[m]) < interval and p < 100:
         return
-
     P[m] = now
     c_mb = c / (1024 * 1024)
     t_mb = t / (1024 * 1024)
     bar = '🟢' * int(p / 10) + '🔴' * (10 - int(p / 10))
     speed = c / (now - st) / (1024 * 1024) if now > st else 0
     eta = time.strftime('%M:%S', time.gmtime((t - c) / (speed * 1024 * 1024))) if speed > 0 else '00:00'
-
     icon = "📥" if ud_type == "Downloading" else "📤"
-
     try:
         await C.edit_message_text(
             h, m,
@@ -231,10 +228,8 @@ async def prog(c, t, C, h, m, st, ud_type):
         await asyncio.sleep(e.value)
     except Exception:
         pass
-
     if p >= 100: P.pop(m, None)
 
-# send directly (without downloading) helper
 async def send_direct(c, m, tcid, ft=None, rtmid=None):
     try:
         if m.video:
@@ -256,10 +251,9 @@ async def send_direct(c, m, tcid, ft=None, rtmid=None):
             return False
         return True
     except Exception as e:
-        print(f'Direct send error: {e}')
+        # print(f'Direct send error: {e}')
         return False
 
-# process message (download/upload/forward)
 async def process_msg(c, u, m, d, lt, uid, i):
     try:
         cfg_chat = await get_user_data_key(d, 'chat_id', None)
@@ -279,14 +273,18 @@ async def process_msg(c, u, m, d, lt, uid, i):
             user_cap = await get_user_data_key(d, 'caption', '')
             ft = f'{proc_text}\n\n{user_cap}' if proc_text and user_cap else user_cap if user_cap else proc_text
 
-            if lt == 'public' and not emp.get(i, False):
-                await send_direct(c, m, tcid, ft, rtmid)
-                return 'Sent directly.'
+            # --- PUBLIC LINK HANDLING ---
+            # Attempt to send directly via file_id.
+            # CRITICAL FIX: If send_direct returns False (fail), we MUST proceed to download.
+            if lt == 'public':
+                if await send_direct(c, m, tcid, ft, rtmid):
+                    return 'Sent directly.'
+                # Direct send failed, falling back to download logic...
 
+            # --- DOWNLOAD LOGIC ---
             st = time.time()
             p = await c.send_message(d, 'Downloading...')
 
-            # extension detection
             video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.3gp', '.ogv'}
             is_real_video = False
             c_name = f"{time.time()}"
@@ -315,7 +313,6 @@ async def process_msg(c, u, m, d, lt, uid, i):
             elif m.photo:
                 c_name = sanitize(f"{time.time()}.jpg")
 
-            # download
             f = await u.download_media(
                 m,
                 file_name=c_name,
@@ -327,13 +324,11 @@ async def process_msg(c, u, m, d, lt, uid, i):
                 await c.edit_message_text(d, p.id, 'Failed.')
                 return 'Failed.'
 
-            # 0KB check
             if os.path.exists(f) and os.path.getsize(f) == 0:
                 os.remove(f)
                 await c.edit_message_text(d, p.id, 'Failed: 0KB File.')
                 return 'Failed: Disk Full.'
 
-            # rename
             if (
                 (m.video and m.video.file_name) or
                 (m.audio and m.audio.file_name) or
@@ -350,7 +345,7 @@ async def process_msg(c, u, m, d, lt, uid, i):
                 if generated_thumb and os.path.exists(generated_thumb): os.remove(generated_thumb)
                 await c.delete_messages(d, p.id)
 
-            # large file handling
+            # --- LARGE FILE HANDLING (via shared_client userbot) ---
             if fsize > 2 and Y:
                 st = time.time()
                 await upd_dlg(Y)
@@ -398,7 +393,7 @@ async def process_msg(c, u, m, d, lt, uid, i):
                 await cleanup()
                 return 'Done (Large file).'
 
-            # normal upload
+            # --- NORMAL UPLOAD HANDLING ---
             st = time.time()
             try:
                 uploaded = False
@@ -448,30 +443,27 @@ async def process_msg(c, u, m, d, lt, uid, i):
     except Exception as e:
         return f'Error: {str(e)[:50]}'
 
+# --- Handlers ---
+
 async def run_multibatch(uid: int, message: Message, slots: list):
     pt = await message.reply_text('Preparing multibatch...')
-
     ubot = UB.get(uid)
     if not ubot:
         await pt.edit('Add bot with /setbot first')
         Z.pop(uid, None)
         return
-
     uc = await get_uclient(uid)
     if not uc:
         await pt.edit('Cannot proceed without user client.')
         Z.pop(uid, None)
         return
-
     if is_user_active(uid):
         await pt.edit('Active task exists. Use /stop first.')
         Z.pop(uid, None)
         return
-
     total_msgs = sum(slot['count'] for slot in slots)
     success = 0
     processed = 0
-
     await add_active_batch(uid, {
         "total": total_msgs,
         "current": 0,
@@ -480,22 +472,17 @@ async def run_multibatch(uid: int, message: Message, slots: list):
         "progress_message_id": pt.id,
         "mode": "multibatch"
     })
-
     try:
         for idx, slot in enumerate(slots, start=1):
             if should_cancel(uid):
                 await pt.edit(f'Cancelled before slot {idx}. Success: {success}/{processed}')
                 break
-
             await pt.edit(f'Starting slot {idx}/{len(slots)} (messages: {slot["count"]})')
-
             for j in range(slot['count']):
                 if should_cancel(uid):
                     await pt.edit(f'Cancelled at slot {idx}, message {j+1}. Success: {success}/{processed}')
                     break
-
                 mid = int(slot['sid']) + j
-
                 try:
                     msg = await get_msg(UB.get(uid), UC.get(uid), slot['cid'], mid, slot['lt'])
                     if msg:
@@ -507,48 +494,38 @@ async def run_multibatch(uid: int, message: Message, slots: list):
                         await pt.edit(f'Slot {idx} {j+1}/{slot["count"]}: Error - {str(e)[:30]}')
                     except:
                         pass
-
                 processed += 1
                 await update_batch_progress(uid, processed, success)
                 await asyncio.sleep(10)
-
             if should_cancel(uid):
                 break
-
             if idx < len(slots):
                 next_slot = slots[idx]
                 await message.reply_text(
                     f'Slot {idx} finished. Slot {idx + 1} starts in 60s. Next link: {next_slot.get("raw_link", "N/A")}')
                 await asyncio.sleep(60)
-
         if not should_cancel(uid):
             await message.reply_text(f'Multibatch completed ✅ Success: {success}/{total_msgs}')
     finally:
         await remove_active_batch(uid)
         Z.pop(uid, None)
 
-# main command handler
 @X.on_message(filters.command(['batch', 'single', 'multibatch']))
 async def process_cmd(c, m):
     uid = m.from_user.id
     cmd = m.command[0]
-
     if FREEMIUM_LIMIT == 0 and not await is_premium_user(uid):
         await m.reply_text("This bot does not provide free servies, get subscription from OWNER")
         return
-
     if await sub(c, m) == 1: return
     pro = await m.reply_text('Doing some checks hold on...')
-
     if is_user_active(uid):
         await pro.edit('You have an active task. Use /stop to cancel it.')
         return
-
     ubot = await get_ubot(uid)
     if not ubot:
         await pro.edit('Add your bot with /setbot first')
         return
-
     if cmd == 'multibatch':
         Z[uid] = {'step': 'multibatch_slots'}
         await pro.edit('How many slots do you want to book? (max 5)')
@@ -559,15 +536,12 @@ async def process_cmd(c, m):
 @X.on_message(filters.command('clone'))
 async def clone_cmd(c, m):
     uid = m.from_user.id
-
     if FREEMIUM_LIMIT == 0 and not await is_premium_user(uid):
         await m.reply_text("This bot does not provide free servies, get subscription from OWNER")
         return
-
     if is_user_active(uid):
         await m.reply_text('You have an active task. Use /stop to cancel it.')
         return
-
     Z[uid] = {'step': 'clone_start'}
     await m.reply_text('Send a public message link to start cloning.')
 
@@ -594,10 +568,8 @@ async def text_handler(c, m):
         if not x:
             await m.reply("Add your bot /setbot `token`")
             return
-
     if s == 'start':
         L = m.text
-        # normalize link
         if not L.startswith('http'):
             L = 'https://' + L
         i, d, lt = E(L)
@@ -607,10 +579,8 @@ async def text_handler(c, m):
             return
         Z[uid].update({'step': 'count', 'cid': i, 'sid': d, 'lt': lt})
         await m.reply_text('How many messages?')
-
     elif s == 'clone_start':
         L = m.text
-        # normalize link
         if not L.startswith('http'):
             L = 'https://' + L
         i, d, lt = E(L)
@@ -618,52 +588,39 @@ async def text_handler(c, m):
             await m.reply_text('Send a valid public message link.')
             Z.pop(uid, None)
             return
-
         Z[uid].update({'step': 'clone_count', 'cid': i, 'sid': d, 'lt': lt})
         await m.reply_text('How many messages do you want to clone?')
-
     elif s == 'clone_count':
-        # === FIXED clone_count branch ===
         if not m.text.isdigit():
             await m.reply_text('Enter valid number.')
             return
-
         count = int(m.text)
         if count < 1:
             await m.reply_text('Please enter at least 1 message.')
             return
-
         maxlimit = PREMIUM_LIMIT if await is_premium_user(uid) else FREEMIUM_LIMIT
         if count > maxlimit:
             await m.reply_text(f'Maximum limit is {maxlimit}.')
             return
-
-        # set state and values
         Z[uid].update({'step': 'clone_process', 'did': str(m.chat.id), 'num': count})
         i, s_id, n, lt = Z[uid]['cid'], Z[uid]['sid'], Z[uid]['num'], Z[uid]['lt']
         success = 0
         j = 0
-
         pt = await m.reply_text('Cloning public messages...')
-
-        # Ensure user bot / user client exist like other flows
         ubot = await get_ubot(uid)
         if not ubot:
             await pt.edit('Add your bot with /setbot first')
             Z.pop(uid, None)
             return
-
         uc = await get_uclient(uid)
         if not uc:
             await pt.edit('Cannot proceed without user client.')
             Z.pop(uid, None)
             return
-
         if is_user_active(uid):
             await pt.edit('Active task exists')
             Z.pop(uid, None)
             return
-
         await add_active_batch(uid, {
             "total": n,
             "current": 0,
@@ -672,20 +629,14 @@ async def text_handler(c, m):
             "progress_message_id": pt.id,
             "mode": "clone"
         })
-
         try:
             for j in range(n):
-
                 if should_cancel(uid):
                     await pt.edit(f'Cancelled at {j}/{n}. Success: {success}')
                     break
-
                 await update_batch_progress(uid, j, success)
-
                 mid = int(s_id) + j
-
                 try:
-                    # Use user's bot/client for fetching and processing
                     msg = await get_msg(ubot, uc, i, mid, lt)
                     if msg:
                         res = await process_msg(ubot, uc, msg, str(m.chat.id), lt, uid, i)
@@ -701,18 +652,12 @@ async def text_handler(c, m):
                         await pt.edit(f'{j+1}/{n}: Error - {str(e)[:50]}')
                     except:
                         pass
-
-                # keep a small delay to avoid flooding
                 await asyncio.sleep(5)
-
             if j+1 == n:
                 await m.reply_text(f'Cloning Completed ✅ Success: {success}/{n}')
-
         finally:
             await remove_active_batch(uid)
             Z.pop(uid, None)
-        # === end clone_count fix ===
-
     elif s == 'multibatch_slots':
         if not m.text.isdigit():
             await m.reply_text('Enter a valid slot number.')
@@ -731,7 +676,6 @@ async def text_handler(c, m):
             'current_slot': 1
         })
         await m.reply_text('Slot 1 - send batch link')
-
     elif s == 'multibatch_link':
         L = m.text
         if not L.startswith('http'):
@@ -745,7 +689,6 @@ async def text_handler(c, m):
             'pending_link': {'cid': i, 'sid': d, 'lt': lt, 'raw_link': L}
         })
         await m.reply_text(f'Slot {Z[uid]["current_slot"]} - how many messages?')
-
     elif s == 'start_single':
         L = m.text
         if not L.startswith('http'):
@@ -758,24 +701,20 @@ async def text_handler(c, m):
         Z[uid].update({'step': 'process_single', 'cid': i, 'sid': d, 'lt': lt})
         i, s, lt = Z[uid]['cid'], Z[uid]['sid'], Z[uid]['lt']
         pt = await m.reply_text('Processing...')
-
         ubot = UB.get(uid)
         if not ubot:
             await pt.edit('Add bot with /setbot first')
             Z.pop(uid, None)
             return
-
         uc = await get_uclient(uid)
         if not uc:
             await pt.edit('Cannot proceed without user client.')
             Z.pop(uid, None)
             return
-
         if is_user_active(uid):
             await pt.edit('Active task exists. Use /stop first.')
             Z.pop(uid, None)
             return
-
         try:
             msg = await get_msg(ubot, uc, i, s, lt)
             if msg:
@@ -787,37 +726,29 @@ async def text_handler(c, m):
             await pt.edit(f'Error: {str(e)[:50]}')
         finally:
             Z.pop(uid, None)
-
     elif s == 'count':
         if not m.text.isdigit():
             await m.reply_text('Enter valid number.')
             return
-
         count = int(m.text)
         maxlimit = PREMIUM_LIMIT if await is_premium_user(uid) else FREEMIUM_LIMIT
-
         if count > maxlimit:
             await m.reply_text(f'Maximum limit is {maxlimit}.')
             return
-
         Z[uid].update({'step': 'process', 'did': str(m.chat.id), 'num': count})
         i, s, n, lt = Z[uid]['cid'], Z[uid]['sid'], Z[uid]['num'], Z[uid]['lt']
         success = 0
-
         pt = await m.reply_text('Processing batch...')
         uc = await get_uclient(uid)
         ubot = UB.get(uid)
-
         if not uc or not ubot:
             await pt.edit('Missing client setup')
             Z.pop(uid, None)
             return
-
         if is_user_active(uid):
             await pt.edit('Active task exists')
             Z.pop(uid, None)
             return
-
         await add_active_batch(uid, {
             "total": n,
             "current": 0,
@@ -825,18 +756,13 @@ async def text_handler(c, m):
             "cancel_requested": False,
             "progress_message_id": pt.id
         })
-
         try:
             for j in range(n):
-
                 if should_cancel(uid):
                     await pt.edit(f'Cancelled at {j}/{n}. Success: {success}')
                     break
-
                 await update_batch_progress(uid, j, success)
-
                 mid = int(s) + j
-
                 try:
                     msg = await get_msg(ubot, uc, i, mid, lt)
                     if msg:
@@ -848,12 +774,9 @@ async def text_handler(c, m):
                 except Exception as e:
                     try: await pt.edit(f'{j+1}/{n}: Error - {str(e)[:30]}')
                     except: pass
-
                 await asyncio.sleep(10)
-
             if j+1 == n:
                 await m.reply_text(f'Batch Completed ✅ Success: {success}/{n}')
-
         finally:
             await remove_active_batch(uid)
             Z.pop(uid, None)
