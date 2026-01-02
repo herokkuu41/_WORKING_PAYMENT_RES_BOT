@@ -94,35 +94,38 @@ async def upd_dlg(c):
 async def get_msg(c, u, i, d, lt):
     try:
         if lt == 'public':
-            emp.setdefault(i, True)
-            try:
-                if str(i).lower().endswith('bot'):
-                    # if the username endswith 'bot' try direct u.get_messages
-                    emp[i] = False
-                    xm = await u.get_messages(i, d)
-                    emp[i] = getattr(xm, "empty", False)
-                    if not emp[i]:
-                        emp[i] = True
-                        print(f"Bot chat found successfully...")
-                        return xm
+            # FIX: Prioritize User Client (u) for public channels
+            if u:
+                try:
+                    # Try fetching directly with user client
+                    msg = await u.get_messages(i, d)
+                    if msg and not getattr(msg, "empty", False):
+                        return msg
+                except Exception as e:
+                    print(f"User fetch failed (attempting join): {e}")
+                
+                # If direct fetch failed, try joining then fetching
+                try:
+                    await u.join_chat(i)
+                    msg = await u.get_messages(i, d)
+                    if msg and not getattr(msg, "empty", False):
+                        return msg
+                except Exception as e:
+                    print(f"User join/fetch failed: {e}")
 
-                if emp[i]:
-                    xm = await c.get_messages(i, d)
-                    print(f"fetched by {c.me.username}")
-                    emp[i] = getattr(xm, "empty", False)
-                    if emp[i]:
-                        print(f"Not fetched by {c.me.username}")
-                        try:
-                            await u.join_chat(i)
-                        except:
-                            pass
-                        xm = await u.get_messages((await u.get_chat(f"@{i}")).id, d)
+            # Fallback to Bot Client (c) if user failed or unavailable
+            if c:
+                try:
+                    msg = await c.get_messages(i, d)
+                    if msg and not getattr(msg, "empty", False):
+                        return msg
+                except Exception as e:
+                    print(f"Bot fetch failed: {e}")
+            
+            return None
 
-                    return xm
-            except Exception as e:
-                print(f'Error fetching public message: {e}')
-                return None
         else:
+            # Private Channel Logic
             if u:
                 try:
                     # Strict ID handling for private chats - normalize to -100<id>
@@ -444,9 +447,6 @@ async def process_msg(c, u, m, d, lt, uid, i):
             return 'Sent.'
     except Exception as e:
         return f'Error: {str(e)[:50]}'
-
-# run multibatch kept unchanged (omitted for brevity - assumed same logic as before)
-# I'll include the rest of the file below as-is (batch/multibatch handlers and clone handler changes)
 
 async def run_multibatch(uid: int, message: Message, slots: list):
     pt = await message.reply_text('Preparing multibatch...')
