@@ -1339,6 +1339,7 @@ async def upd_dlg(c):
 async def get_msg(c, u, i, d, lt):
     try:
         if lt == 'public':
+            emp.setdefault(i, True)
             try:
                 if str(i).lower().endswith('bot'):
                     emp[i] = False
@@ -1804,6 +1805,23 @@ async def process_cmd(c, m):
         Z[uid] = {'step': 'start' if cmd == 'batch' else 'start_single'}
         await pro.edit(f'Send {"start link..." if cmd == "batch" else "link you to process"}.')
 
+
+@X.on_message(filters.command('clone'))
+async def clone_cmd(c, m):
+    uid = m.from_user.id
+
+    if FREEMIUM_LIMIT == 0 and not await is_premium_user(uid):
+        await m.reply_text("This bot does not provide free servies, get subscription from OWNER")
+        return
+
+    if is_user_active(uid):
+        await m.reply_text('You have an active task. Use /stop to cancel it.')
+        return
+
+    Z[uid] = {'step': 'clone_start'}
+    await m.reply_text('Send a public message link to start cloning.')
+
+
 @X.on_message(filters.command(['cancel', 'stop']))
 async def cancel_cmd(c, m):
     uid = m.from_user.id
@@ -1817,15 +1835,16 @@ async def cancel_cmd(c, m):
 
 @X.on_message(filters.text & filters.private & ~login_in_progress & ~filters.command([
     'start', 'batch', 'multibatch', 'cancel', 'login', 'logout', 'stop', 'set',
-    'pay', 'redeem', 'gencode', 'single', 'generate', 'keyinfo', 'encrypt', 'decrypt', 'keys', 'setbot', 'rembot']))
+    'pay', 'redeem', 'gencode', 'single', 'generate', 'keyinfo', 'encrypt', 'decrypt', 'keys', 'setbot', 'rembot', 'clone']))
 async def text_handler(c, m):
     uid = m.from_user.id
     if uid not in Z: return
     s = Z[uid].get('step')
-    x = await get_ubot(uid)
-    if not x:
-        await m.reply("Add your bot /setbot `token`")
-        return
+    if s not in {'clone_start', 'clone_count'}:
+        x = await get_ubot(uid)
+        if not x:
+            await m.reply("Add your bot /setbot `token`")
+            return
 
     if s == 'start':
         L = m.text
@@ -1836,6 +1855,85 @@ async def text_handler(c, m):
             return
         Z[uid].update({'step': 'count', 'cid': i, 'sid': d, 'lt': lt})
         await m.reply_text('How many messages?')
+
+    elif s == 'clone_start':
+        L = m.text
+        i, d, lt = E(L)
+        if not i or not d or lt != 'public':
+            await m.reply_text('Send a valid public message link.')
+            Z.pop(uid, None)
+            return
+
+        Z[uid].update({'step': 'clone_count', 'cid': i, 'sid': d, 'lt': lt})
+        await m.reply_text('How many messages do you want to clone?')
+
+    elif s == 'clone_count':
+        if not m.text.isdigit():
+            await m.reply_text('Enter valid number.')
+            return
+
+        count = int(m.text)
+        if count < 1:
+            await m.reply_text('Please enter at least 1 message.')
+            return
+        maxlimit = PREMIUM_LIMIT if await is_premium_user(uid) else FREEMIUM_LIMIT
+
+        if count > maxlimit:
+            await m.reply_text(f'Maximum limit is {maxlimit}.')
+            return
+
+        Z[uid].update({'step': 'clone_process', 'did': str(m.chat.id), 'num': count})
+        i, s_id, n, lt = Z[uid]['cid'], Z[uid]['sid'], Z[uid]['num'], Z[uid]['lt']
+        success = 0
+        j = 0
+
+        pt = await m.reply_text('Cloning public messages...')
+
+        if is_user_active(uid):
+            await pt.edit('Active task exists')
+            Z.pop(uid, None)
+            return
+
+        await add_active_batch(uid, {
+            "total": n,
+            "current": 0,
+            "success": 0,
+            "cancel_requested": False,
+            "progress_message_id": pt.id,
+            "mode": "clone"
+            })
+
+        try:
+            for j in range(n):
+
+                if should_cancel(uid):
+                    await pt.edit(f'Cancelled at {j}/{n}. Success: {success}')
+                    break
+
+                await update_batch_progress(uid, j, success)
+
+                mid = int(s_id) + j
+
+                try:
+                    msg = await get_msg(X, X, i, mid, lt)
+                    if msg:
+                        res = await process_msg(X, X, msg, str(m.chat.id), lt, uid, i)
+                        if 'Done' in res or 'Copied' in res or 'Sent' in res:
+                            success += 1
+                    else:
+                        await pt.edit(f'{j+1}/{n}: Message not found')
+                except Exception as e:
+                    try: await pt.edit(f'{j+1}/{n}: Error - {str(e)[:30]}')
+                    except: pass
+
+                await asyncio.sleep(5)
+
+            if j+1 == n:
+                await m.reply_text(f'Cloning Completed ✅ Success: {success}/{n}')
+
+        finally:
+            await remove_active_batch(uid)
+            Z.pop(uid, None)
 
     elif s == 'multibatch_slots':
         if not m.text.isdigit():
