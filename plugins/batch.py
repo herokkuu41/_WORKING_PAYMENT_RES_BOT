@@ -1339,30 +1339,54 @@ async def upd_dlg(c):
 async def get_msg(c, u, i, d, lt):
     try:
         if lt == 'public':
+            emp.setdefault(i, True)
+            identifiers = [i]
+            if not str(i).startswith("@"):
+                identifiers.append(f"@{i}")
             try:
-                if str(i).lower().endswith('bot'):
-                    emp[i] = False
-                    xm = await u.get_messages(i, d)
-                    emp[i] = getattr(xm, "empty", False)
-                    if not emp[i]:
-                        emp[i] = True
-                        print(f"Bot chat found successfully...")
+                chat = await u.get_chat(i)
+                identifiers.append(chat.id)
+            except Exception:
+                pass
+
+            last_error = None
+
+            # Try resolving with current client first
+            for ident in identifiers:
+                try:
+                    xm = await c.get_messages(ident, d)
+                    if xm and not getattr(xm, "empty", False):
+                        emp[i] = False
                         return xm
-                    
-                if emp[i]:
-                    xm = await c.get_messages(i, d)
-                    print(f"fetched by {c.me.username}")
                     emp[i] = getattr(xm, "empty", False)
-                    if emp[i]:
-                        print(f"Not fetched by {c.me.username}")
-                        try: await u.join_chat(i)
-                        except: pass
-                        xm = await u.get_messages((await u.get_chat(f"@{i}")).id, d)
-                    
-                    return xm                   
+                except Exception as e:
+                    last_error = e
+                    continue
+
+            # Attempt joining via user client then retry
+            try:
+                await u.join_chat(i)
+                try:
+                    chat = await u.get_chat(i)
+                    identifiers.append(chat.id)
+                except Exception:
+                    pass
+                for ident in identifiers:
+                    try:
+                        xm = await u.get_messages(ident, d)
+                        if xm and not getattr(xm, "empty", False):
+                            emp[i] = False
+                            return xm
+                        emp[i] = getattr(xm, "empty", False)
+                    except Exception as e:
+                        last_error = e
+                        continue
             except Exception as e:
-                print(f'Error fetching public message: {e}')
-                return None
+                last_error = e
+
+            if last_error:
+                print(f'Error fetching public message: {last_error}')
+            return None
         else:
             if u:
                 try:
@@ -1780,7 +1804,7 @@ async def run_multibatch(uid: int, message: Message, slots: list):
 async def process_cmd(c, m):
     uid = m.from_user.id
     cmd = m.command[0]
-    
+
     if FREEMIUM_LIMIT == 0 and not await is_premium_user(uid):
         await m.reply_text("This bot does not provide free servies, get subscription from OWNER")
         return
@@ -1804,6 +1828,27 @@ async def process_cmd(c, m):
         Z[uid] = {'step': 'start' if cmd == 'batch' else 'start_single'}
         await pro.edit(f'Send {"start link..." if cmd == "batch" else "link you to process"}.')
 
+
+@X.on_message(filters.command('clone'))
+async def clone_cmd(c, m):
+    uid = m.from_user.id
+
+    if FREEMIUM_LIMIT == 0 and not await is_premium_user(uid):
+        await m.reply_text("This bot does not provide free servies, get subscription from OWNER")
+        return
+
+    if is_user_active(uid):
+        await m.reply_text('You have an active task. Use /stop to cancel it.')
+        return
+
+    if not Y:
+        await m.reply_text("Public cloning needs the global session (STRING) configured.")
+        return
+
+    Z[uid] = {'step': 'clone_start'}
+    await m.reply_text('Send a public message link to start cloning.')
+
+
 @X.on_message(filters.command(['cancel', 'stop']))
 async def cancel_cmd(c, m):
     uid = m.from_user.id
@@ -1817,14 +1862,19 @@ async def cancel_cmd(c, m):
 
 @X.on_message(filters.text & filters.private & ~login_in_progress & ~filters.command([
     'start', 'batch', 'multibatch', 'cancel', 'login', 'logout', 'stop', 'set',
-    'pay', 'redeem', 'gencode', 'single', 'generate', 'keyinfo', 'encrypt', 'decrypt', 'keys', 'setbot', 'rembot']))
+    'pay', 'redeem', 'gencode', 'single', 'generate', 'keyinfo', 'encrypt', 'decrypt', 'keys', 'setbot', 'rembot', 'clone']))
 async def text_handler(c, m):
     uid = m.from_user.id
     if uid not in Z: return
     s = Z[uid].get('step')
-    x = await get_ubot(uid)
-    if not x:
-        await m.reply("Add your bot /setbot `token`")
+    if s not in {'clone_start', 'clone_count'}:
+        x = await get_ubot(uid)
+        if not x:
+            await m.reply("Add your bot /setbot `token`")
+            return
+    elif not Y:
+        await m.reply_text("Public cloning needs the global session (STRING) configured.")
+        Z.pop(uid, None)
         return
 
     if s == 'start':
@@ -1836,6 +1886,100 @@ async def text_handler(c, m):
             return
         Z[uid].update({'step': 'count', 'cid': i, 'sid': d, 'lt': lt})
         await m.reply_text('How many messages?')
+
+    elif s == 'clone_start':
+        L = m.text
+        i, d, lt = E(L)
+        if not i or not d or lt != 'public':
+            await m.reply_text('Send a valid public message link.')
+            Z.pop(uid, None)
+            return
+
+        Z[uid].update({'step': 'clone_count', 'cid': i, 'sid': d, 'lt': lt})
+        await m.reply_text('How many messages do you want to clone?')
+
+    elif s == 'clone_count':
+        if not m.text.isdigit():
+            await m.reply_text('Enter valid number.')
+            return
+
+        count = int(m.text)
+        if count < 1:
+            await m.reply_text('Please enter at least 1 message.')
+            return
+        maxlimit = PREMIUM_LIMIT if await is_premium_user(uid) else FREEMIUM_LIMIT
+
+        if count > maxlimit:
+            await m.reply_text(f'Maximum limit is {maxlimit}.')
+            return
+
+        Z[uid].update({'step': 'clone_process', 'did': str(m.chat.id), 'num': count})
+        i, s_id, n, lt = Z[uid]['cid'], Z[uid]['sid'], Z[uid]['num'], Z[uid]['lt']
+        success = 0
+        j = 0
+
+        pt = await m.reply_text('Cloning public messages...')
+
+        if is_user_active(uid):
+            await pt.edit('Active task exists')
+            Z.pop(uid, None)
+            return
+
+        # Use the global userbot for fetching/downloading public content, fall back to the bot only if unavoidable
+        source_client = Y if Y else X
+
+        # Refresh dialogs for the userbot to reduce cache misses on public channels
+        try:
+            await upd_dlg(source_client)
+        except Exception:
+            pass
+
+        # Ensure the source client is inside the channel before starting
+        try:
+            await source_client.join_chat(i)
+        except Exception:
+            pass
+
+        await add_active_batch(uid, {
+            "total": n,
+            "current": 0,
+            "success": 0,
+            "cancel_requested": False,
+            "progress_message_id": pt.id,
+            "mode": "clone"
+            })
+
+        try:
+            for j in range(n):
+
+                if should_cancel(uid):
+                    await pt.edit(f'Cancelled at {j}/{n}. Success: {success}')
+                    break
+
+                await update_batch_progress(uid, j, success)
+
+                mid = int(s_id) + j
+
+                try:
+                    msg = await get_msg(source_client, source_client, i, mid, lt)
+                    if msg:
+                        res = await process_msg(X, source_client, msg, str(m.chat.id), lt, uid, i)
+                        if 'Done' in res or 'Copied' in res or 'Sent' in res:
+                            success += 1
+                    else:
+                        await pt.edit(f'{j+1}/{n}: Message not found (public fetch failed)')
+                except Exception as e:
+                    try: await pt.edit(f'{j+1}/{n}: Error - {str(e)[:30]}')
+                    except: pass
+
+                await asyncio.sleep(5)
+
+            if j+1 == n:
+                await m.reply_text(f'Cloning Completed ✅ Success: {success}/{n}')
+
+        finally:
+            await remove_active_batch(uid)
+            Z.pop(uid, None)
 
     elif s == 'multibatch_slots':
         if not m.text.isdigit():
